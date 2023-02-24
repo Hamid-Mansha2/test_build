@@ -1,0 +1,94 @@
+---
+language: java
+os:
+- linux
+dist: bionic
+env:
+  jobs:
+  - NODE_VERSION: '"14"'
+    DOCKER_TAG: latest
+    CLOUDSDK_CORE_DISABLE_PROMPTS: '1'
+    CLOUDSDK_PYTHON_SITEPACKAGES: '1'
+sudo: true
+group: edge
+python:
+- '3.8'
+services:
+- docker
+- xvfb
+cache:
+  directories:
+  - "$HOME/.m2"
+  - "$HOME/google-cloud-sdk"
+jdk:
+- openjdk8
+branches:
+  only:
+  - travis
+  - develop
+  - "/^release-.*$/"
+  - "/^hotfix\\/.*$/"
+  - master
+before_install:
+- echo "TRAVIS_BRANCH" - $TRAVIS_BRANCH
+- echo "TRAVIS_BUILD_DIR" - $TRAVIS_BUILD_DIR
+- echo "TRAVIS_EVENT_TYPE" - $TRAVIS_EVENT_TYPE
+- echo "TRAVIS_TAG" - $TRAVIS_TAG
+- echo "CLOUDSDK_COMPUTE_ZONE" - $CLOUDSDK_COMPUTE_ZONE
+- echo "CLOUDSDK_CORE_DISABLE_PROMPTS" - $CLOUDSDK_CORE_DISABLE_PROMPTS
+- echo "CLOUDSDK_CORE_PROJECT" - $CLOUDSDK_CORE_PROJECT
+- echo "GCLOUD_EMAIL" - $GCLOUD_EMAIL
+- sudo apt-get -qq update
+- sudo apt-get install -y docker-ce
+- sudo apt-get install python3-pip
+- sudo apt-get install python3-setuptools
+- sudo pip3 install --upgrade pip
+- sudo apt-get install -y libssl-dev
+- sudo apt-get install -y docker-compose
+- docker-compose version
+- export DISPLAY=:99.0
+- "/sbin/start-stop-daemon --start --quiet --pidfile /tmp/custom_xvfb_99.pid --make-pidfile
+  --background --exec /usr/bin/Xvfb -- :99 -ac -screen 0 1280x1024x16"
+- sudo /etc/init.d/mysql stop
+- sudo pip3 install pyOpenSSL --upgrade
+- if [ ! -d "$HOME/.config/gcloud" ]; then mkdir $HOME/.config/gcloud; sudo chown
+  -R travis:travis $HOME/.config/; fi
+- if [ ! -d "$HOME/google-cloud-sdk/bin" ]; then rm -rf $HOME/google-cloud-sdk; curl
+  https://sdk.cloud.google.com | bash > /dev/null; fi
+- source $HOME/google-cloud-sdk/path.bash.inc
+- sudo chown -R travis:travis $HOME/.config/
+- echo $GCLOUD_KEY | base64 --decode > gcloud.json
+- gcloud config set account $GCLOUD_EMAIL
+- gcloud auth activate-service-account $GCLOUD_EMAIL --key-file gcloud.json
+- ssh-keygen -f ~/.ssh/google_compute_engine -N ""
+- gcloud auth configure-docker
+- cat $HOME/.docker/config.json
+- echo "$DOCKER_HUB_TOKEN" | docker login -u "$DOCKER_HUB_USERNAME" --password-stdin
+- if [ $TRAVIS_BRANCH == "develop" ]; then $TRAVIS_BUILD_DIR/build-docker.sh pull
+  latest; elif [ $TRAVIS_BRANCH == "master" ]; then echo "Master branch, skip pull.";
+  else $TRAVIS_BUILD_DIR/build-docker.sh pull $TRAVIS_BRANCH; fi
+install:
+- if [ $TRAVIS_BRANCH != "master" ]; then mvn install -Dmaven.javadoc.skip=true -B
+  -V --quiet || travis_terminate 1; else echo "Master branch, skip pull."; fi
+before_script:
+- echo "Installing Node.js"
+- if [ $TRAVIS_BRANCH != "master" ]; then . $HOME/.nvm/nvm.sh; nvm install $NODE_VERSION;
+  nvm use $NODE_VERSION; fi
+script:
+- if [[ $TRAVIS_BRANCH == "master" ]]; then echo "Master branch, skip build."; else
+  $TRAVIS_BUILD_DIR/build-docker.sh build $TRAVIS_BRANCH || travis_terminate 1; fi
+- if [[ $TRAVIS_BRANCH =~ ^release-.* ]]; then cd $TRAVIS_BUILD_DIR/systemtest &&
+  service docker start && npm install --loglevel=silent --depth=0 && npm test || travis_terminate
+  1; cd $TRAVIS_BUILD_DIR; fi
+after_success:
+- if [[ $TRAVIS_BRANCH =~ ^release-.* && $TRAVIS_EVENT_TYPE == "push" ]]; then $TRAVIS_BUILD_DIR/build-docker.sh
+  push $TRAVIS_BRANCH; else echo "Code is from a non-release branch, or this is not
+  a push event => not uploading to GCR."; fi
+deploy:
+- provider: script
+  script: "$TRAVIS_BUILD_DIR/deploy-prod.new.sh $TRAVIS_TAG"
+  'on':
+    branch:
+    - master
+    condition:
+    - $TRAVIS_EVENT_TYPE == "push"
